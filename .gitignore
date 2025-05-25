@@ -365,3 +365,4 @@ FodyWeavers.xsd
 # ignore appsettings file
 appsettings.json
 appsettings.Development.json
+/SkillSyncAPI/appsettings.json
