@@ -155,13 +155,6 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-app.UseStaticFiles(new StaticFileOptions
-{
-    FileProvider = new PhysicalFileProvider(
-        Path.Combine(Directory.GetCurrentDirectory(), "images")),
-    RequestPath = "/images"
-});
-
 // Use CORS middleware BEFORE routing or authorization middleware
 app.UseCors("AllowAll");
 
