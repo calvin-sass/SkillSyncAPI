@@ -1,11 +1,8 @@
-﻿using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
-using Microsoft.IdentityModel.JsonWebTokens;
-using Microsoft.IdentityModel.Tokens;
-using SkillSyncAPI.Data;
-using SkillSyncAPI.DTOs.Users;
-using SkillSyncAPI.Models;
+﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using SkillSyncAPI.Domain.DTOs.Users;
+using SkillSyncAPI.Domain.Entities;
+using SkillSyncAPI.Services;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
@@ -17,108 +14,129 @@ namespace SkillSyncAPI.Controllers
     [Route("api/v1/[controller]")]
     public class AuthController : ControllerBase
     {
-        private readonly ApplicationDbContext _context;
+        private readonly IAuthService _authService;
         private readonly IConfiguration _configuration;
 
-        public AuthController(ApplicationDbContext context, IConfiguration configuration)
+        public AuthController(IAuthService authService, IConfiguration configuration)
         {
-            _context = context;
+            _authService = authService;
             _configuration = configuration;
         }
 
-        // POST: api/v1/Auth/register
-        [HttpPost("register")]
+        // STEP 1: Request signup code (user details + email)
+        // POST: api/v1/Auth/request-signup-code
+        [HttpPost("request-signup-code")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
-        public async Task<IActionResult> Register(UserRegisterDto dto)
+        public async Task<IActionResult> RequestSignupCode([FromBody] UserRegisterDto dto)
         {
             if (dto == null)
                 return BadRequest(new { message = "Invalid request body." });
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState); // Returns detailed validation errors
-
-            if (await _context.Users.AnyAsync(u => u.Username == dto.Username))
-                return BadRequest(new { message = "Username not available." });
-
-
-            if (await _context.Users.AnyAsync(u => u.Email == dto.Email))
+            // Check if user already exists
+            var existingUser = await _authService.FindUserByEmailAsync(dto.Email);
+            if (existingUser != null)
                 return BadRequest(new { message = "Email already used." });
 
-            var role = dto.Role == "Seller" ? "Seller" : "User";
+            var (success, error) = await _authService.CreatePendingUserAndSendCodeAsync(dto);
+            if (!success)
+                return BadRequest(new { message = error });
 
-            var user = new User
-            {
-                Username = dto.Username,
-                Email = dto.Email,
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.Password),
-                Phone = dto.Phone,
-                Address = dto.Address,
-                Role = role
-            };
-
-            _context.Users.Add(user);
-            await _context.SaveChangesAsync();
-
-            return Ok(new { message = "User registered successfully"});
+            return Ok(new { message = "Verification code sent to your email." });
         }
 
+        // STEP 2: Confirm code and create account
+        // POST: api/v1/Auth/confirm-signup-code
+        [HttpPost("confirm-signup-code")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<IActionResult> ConfirmSignupCode([FromBody] ConfirmEmailDto dto)
+        {
+            if (dto == null)
+                return BadRequest(new { message = "Invalid request body." });
+
+            var (success, error) = await _authService.ConfirmPendingUserAndCreateAccountAsync(dto.Email, dto.Token);
+            if (!success)
+                return BadRequest(new { message = error });
+
+            return Ok(new { message = "Account created and email confirmed. You can now log in." });
+        }
+
+        // LOGIN
         // POST: api/v1/Auth/login
         [HttpPost("login")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
         [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-        public async Task<IActionResult> Login(UserLoginDto dto)
+        public async Task<IActionResult> Login([FromBody] UserLoginDto dto)
         {
             if (dto == null)
                 return BadRequest(new { message = "Invalid request body." });
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
+            var (user, token, refreshToken, error) = await _authService.LoginAsync(dto);
+            if (user == null)
+                return Unauthorized(new { message = error });
 
-            var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == dto.Email);
-            if (user == null || !BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash))
-                return Unauthorized(new { message = "Invalid credentials."});
-
-            var token = GenerateJwtToken(user);
+            if (!user.EmailConfirmed)
+                return BadRequest(new { message = "Please confirm your email before logging in." });
 
             return Ok(new
             {
                 token,
+                refreshToken,
                 user = new
                 {
-                    user.Id,
-                    user.Username,
-                    user.Email,
-                    user.Role
+                    id = user.Id,
+                    username = user.UserName,
+                    email = user.Email,
+                    role = user.Role
                 }
             });
         }
 
-        private string GenerateJwtToken(User user)
+        // REFRESH TOKEN
+        // POST: api/v1/Auth/refresh
+        [HttpPost("refresh")]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        public async Task<IActionResult> Refresh([FromBody] RefreshTokenDto dto)
         {
-            var claims = new[]
-            {
-                        new Claim(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub, user.Email),
-                        new Claim("id", user.Id.ToString()),
-                        new Claim(ClaimTypes.Role, user.Role),
-                        new Claim(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
-                };
+            if (dto == null || string.IsNullOrEmpty(dto.Token) || string.IsNullOrEmpty(dto.Email))
+                return BadRequest(new { message = "Invalid refresh token data." });
 
-            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]));
-            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-            var expires = DateTime.UtcNow.AddHours(3);
+            var (token, newRefreshToken, error) = await _authService.RefreshTokenAsync(dto.Email, dto.Token);
+            if (token == null)
+                return Unauthorized(new { message = error });
 
-            var token = new JwtSecurityToken(
-                issuer: _configuration["Jwt:Issuer"],
-                audience: _configuration["Jwt:Audience"],
-                claims: claims,
-                expires: expires,
-                signingCredentials: creds
-            );
+            return Ok(new { token, refreshToken = newRefreshToken });
+        }
 
-            return new JwtSecurityTokenHandler().WriteToken(token);
+        // FORGOT PASSWORD
+        [HttpPost("request-password-reset")]
+        public async Task<IActionResult> RequestPasswordReset([FromBody] string email)
+        {
+            var user = await _authService.FindUserByEmailAsync(email);
+            if (user == null)
+                return Ok(new { message = "If the email exists, a reset link has been sent." }); // Don't reveal user existence
 
+            // Use frontend URL from configuration instead of API URL
+            string frontendUrl = _configuration["FrontendUrl"] ?? "http://localhost:5173";
+            var (success, error) = await _authService.SendPasswordResetLinkAsync(email, frontendUrl);
+            if (!success)
+                return BadRequest(new { message = error });
+
+            return Ok(new { message = "If the email exists, a reset link has been sent." });
+        }
+
+        // RESET PASSWORD
+        [HttpPost("reset-password")]
+        public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordDto dto)
+        {
+            var (success, error) = await _authService.ResetPasswordWithTokenAsync(dto.Email, dto.Token, dto.NewPassword);
+            if (!success)
+                return BadRequest(new { message = error });
+
+            return Ok(new { message = "Password reset successfully." });
         }
     }
 }

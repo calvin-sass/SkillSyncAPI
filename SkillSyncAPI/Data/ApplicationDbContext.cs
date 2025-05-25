@@ -1,41 +1,51 @@
-﻿using Microsoft.EntityFrameworkCore;
-using SkillSyncAPI.Helpers.Interfaces;
-using SkillSyncAPI.Models;
+﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+using SkillSyncAPI.Domain.Entities;
 
 namespace SkillSyncAPI.Data
 {
-    public class ApplicationDbContext : DbContext
+    public class ApplicationDbContext : IdentityDbContext<ApplicationUser, IdentityRole<int>, int>
     {
         public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
             : base(options)
         {
         }
 
-        public DbSet<User> Users { get; set; }
+        public DbSet<ApplicationUser> Users { get; set; }
+
+        public DbSet<PendingUser> PendingUsers { get; set; }
 
         public DbSet<Service> Services { get; set; }
 
+        public DbSet<ServiceImage> ServiceImages { get; set; }
+
         public DbSet<Booking> Bookings { get; set; }
+
+        public DbSet<Payment> Payments { get; set; }
 
         public DbSet<Review> Reviews { get; set; }
 
         public DbSet<Notification> Notifications { get; set; }
+
+        public DbSet<RefreshToken> RefreshTokens { get; set; }
+
+        public DbSet<VerificationCode> VerificationCodes { get; set; }
+
+        public DbSet<PasswordResetToken> PasswordResetTokens { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
 
             // User
-            modelBuilder.Entity<User>(user =>
+            modelBuilder.Entity<ApplicationUser>(user =>
             {
                 user.HasMany(u => u.Services)
                     .WithOne(s => s.User)
                     .HasForeignKey(s => s.UserId);
 
                 user.HasQueryFilter(u => !u.IsDeleted);
-
-                user.HasIndex(u => u.Username)
-                    .IsUnique();
             });
 
             // SERVICE  
@@ -48,6 +58,11 @@ namespace SkillSyncAPI.Data
                 service.HasMany(s => s.Reviews)
                        .WithOne(r => r.Service)
                        .HasForeignKey(r => r.ServiceId);
+
+                service.HasMany(s => s.Images)
+                       .WithOne(i => i.Service)
+                       .HasForeignKey(i => i.ServiceId)
+                       .OnDelete(DeleteBehavior.Cascade);
             });
 
             // BOOKING
@@ -79,15 +94,22 @@ namespace SkillSyncAPI.Data
             // REVIEW
             modelBuilder.Entity<Review>(review =>
             {
+                review.HasOne(r => r.Service)
+                      .WithMany(s => s.Reviews)
+                      .HasForeignKey(r => r.ServiceId)
+                      .OnDelete(DeleteBehavior.Restrict); // or DeleteBehavior.NoAction
+
+                review.HasOne(r => r.Booking)
+                      .WithMany()
+                      .HasForeignKey(r => r.BookingId)
+                      .OnDelete(DeleteBehavior.Cascade);
+
                 review.HasOne(r => r.User)
                       .WithMany(u => u.Reviews)
                       .HasForeignKey(r => r.UserId)
                       .OnDelete(DeleteBehavior.Restrict);
 
-                review.HasOne(r => r.Service)
-                      .WithMany(s => s.Reviews)
-                      .HasForeignKey(r => r.ServiceId)
-                      .OnDelete(DeleteBehavior.Cascade);
+                review.HasQueryFilter(r => !r.IsDeleted);
             });
 
             // NOTIFICATION
@@ -97,30 +119,14 @@ namespace SkillSyncAPI.Data
                             .WithMany(u => u.Notifications) // Make sure User has ICollection<Notification>
                             .HasForeignKey(n => n.UserId)
                             .OnDelete(DeleteBehavior.Cascade);
-            });        
-        }
+            });
 
-        public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
-        {
-            var entries = ChangeTracker
-                .Entries<IAuditable>();
-
-            var utcNow = DateTime.UtcNow;
-
-            foreach (var entry in entries)
+            // VERIFICATION CODE
+            modelBuilder.Entity<VerificationCode>(vc =>
             {
-                if (entry.State == EntityState.Added)
-                {
-                    entry.Entity.CreatedAt = utcNow;
-                    entry.Entity.UpdatedAt = utcNow;
-                }
-                else if (entry.State == EntityState.Modified)
-                {
-                    entry.Entity.UpdatedAt = utcNow;
-                }
-            }
-
-            return await base.SaveChangesAsync(cancellationToken);
+                vc.HasIndex(v => v.Email);
+                vc.Property(v => v.Code).IsRequired().HasMaxLength(5);
+            });
         }
     }
 }
